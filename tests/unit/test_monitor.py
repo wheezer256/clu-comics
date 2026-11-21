@@ -1459,3 +1459,70 @@ def test_a_rewritten_archive_gets_a_fresh_attempt(handler, monkeypatch):
 
     h._handle_file_if_complete(zip_path)
     assert not os.path.exists(zip_path), "the good copy must be unpacked immediately"
+
+
+# ---------------------------------------------------------------------------
+# PDF -> CBZ in the WATCH pipeline (#834). A PDF used to be converted only when
+# it came out of a multipart release folder; any other PDF reached TARGET raw.
+# ---------------------------------------------------------------------------
+
+def _fake_pdf_converter(calls, succeed=True):
+    """Stand-in for cbz_ops.pdf.process_pdf_file: same contract (sibling .cbz,
+    PDF deleted on success; errors swallowed, nothing written on failure)."""
+    def fake(pdf_path):
+        calls.append(pdf_path)
+        if succeed:
+            import zipfile
+            with zipfile.ZipFile(os.path.splitext(pdf_path)[0] + ".cbz", "w") as z:
+                z.writestr("page001.jpg", b"jpg")
+            os.remove(pdf_path)
+    return fake
+
+
+def test_pdf_in_watch_is_converted_before_the_move(handler, monkeypatch):
+    import cbz_ops.pdf
+    h, watch, target = handler
+    h.autoconvert = True
+    calls = []
+    monkeypatch.setattr(cbz_ops.pdf, "process_pdf_file", _fake_pdf_converter(calls))
+    _write(os.path.join(watch, "Fantastic Four 001 (2011).pdf"), b"%PDF-1.4")
+
+    assert h._process_file(os.path.join(watch, "Fantastic Four 001 (2011).pdf")) is True
+
+    assert os.path.exists(_moved_path(target, "Fantastic Four 001 (2011).cbz"))
+    assert not os.path.exists(_moved_path(target, "Fantastic Four 001 (2011).pdf"))
+    # Rendered in a hidden stage, never in WATCH where the observer would see pages.
+    assert os.path.basename(os.path.dirname(calls[0])).startswith(".clu_pdf_")
+    assert sorted(os.listdir(watch)) == [], "stage and PDF must both be gone"
+
+
+def test_failed_pdf_conversion_stays_in_watch_as_a_problem(handler, monkeypatch):
+    import cbz_ops.pdf
+    import monitor
+    h, watch, target = handler
+    h.autoconvert = True
+    recorded = []
+    monkeypatch.setattr(cbz_ops.pdf, "process_pdf_file", _fake_pdf_converter([], succeed=False))
+    monkeypatch.setattr(monitor, "record_problem", lambda path, source, **k: recorded.append((path, source)))
+    pdf = os.path.join(watch, "Broken 001 (2011).pdf")
+    _write(pdf, b"%PDF-1.4 truncated")
+
+    assert h._process_file(pdf) is False
+
+    assert os.path.exists(pdf), "the PDF is put back untouched"
+    assert os.listdir(target) == [], "nothing reaches TARGET"
+    assert recorded == [(pdf, monitor.SOURCE_CONVERT)]
+    assert os.listdir(watch) == ["Broken 001 (2011).pdf"], "no stage left behind"
+
+
+def test_pdf_moves_as_is_when_autoconvert_is_off(handler, monkeypatch):
+    import cbz_ops.pdf
+    h, watch, target = handler
+    calls = []
+    monkeypatch.setattr(cbz_ops.pdf, "process_pdf_file", _fake_pdf_converter(calls))
+    _write(os.path.join(watch, "Plain 001 (2011).pdf"), b"%PDF-1.4")
+
+    h._process_file(os.path.join(watch, "Plain 001 (2011).pdf"))
+
+    assert calls == []
+    assert os.path.exists(_moved_path(target, "Plain 001 (2011).pdf"))

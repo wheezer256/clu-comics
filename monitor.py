@@ -5,6 +5,7 @@ import os
 import sys
 import threading # Added for in-flight processing guard
 import zipfile
+import tempfile
 import re # Added for _is_temporary_download_file
 import math # Added for format_size
 from watchdog.observers.polling import PollingObserver
@@ -28,7 +29,7 @@ from core.database import init_db
 # monitor.py is a separate process, but it shares the one SQLite file, so the
 # worklist is a plain import -- a download that will not unpack is exactly the
 # kind of damaged file /library-health exists to surface.
-from core.problem_files import record_problem, clear_problem, SOURCE_UNPACK
+from core.problem_files import record_problem, clear_problem, SOURCE_UNPACK, SOURCE_CONVERT
 
 load_config()
 
@@ -281,22 +282,46 @@ class DownloadCompleteHandler(FileSystemEventHandler):
         normal per-file pipeline (rename, CBR->CBZ, move to TARGET)."""
         ext = os.path.splitext(staged_path)[1].lower()
         if ext == ".pdf":
-            monitor_logger.info(f"Converting unwrapped PDF to CBZ: {staged_path}")
-            try:
-                from cbz_ops.pdf import process_pdf_file
-                process_pdf_file(staged_path)  # writes a sibling .cbz, deletes the PDF
-            except Exception as e:
-                monitor_logger.error(f"PDF conversion failed for {staged_path}: {e}")
+            cbz_path = self._convert_pdf(staged_path)
+            if cbz_path is None:
                 return
-            cbz_path = os.path.splitext(staged_path)[0] + ".cbz"
-            if not os.path.exists(cbz_path):
-                monitor_logger.error(f"PDF conversion produced no CBZ for {staged_path}")
-                return
-            from helpers import match_parent_permissions
-            match_parent_permissions(cbz_path)
             staged_path = cbz_path
 
         self._process_file(staged_path)
+
+    def _convert_pdf(self, pdf_path):
+        """Convert *pdf_path* to a CBZ beside it. Returns the CBZ path, or None.
+
+        ``process_pdf_file`` renders every page into a folder next to the PDF,
+        which in WATCH the observer would pick up page by page, so the work is
+        done in a hidden stage and only the finished CBZ is moved out. On any
+        failure the PDF is put back where it was and recorded as a problem
+        file: it must never travel on to TARGET unconverted.
+        """
+        folder = os.path.dirname(pdf_path)
+        stage = tempfile.mkdtemp(prefix=".clu_pdf_", dir=folder)
+        staged = os.path.join(stage, os.path.basename(pdf_path))
+        try:
+            monitor_logger.info(f"Converting PDF to CBZ: {pdf_path}")
+            os.replace(pdf_path, staged)
+            from cbz_ops.pdf import process_pdf_file
+            process_pdf_file(staged)  # writes a sibling .cbz, deletes the PDF; swallows its errors
+            staged_cbz = os.path.splitext(staged)[0] + ".cbz"
+            if not os.path.exists(staged_cbz):
+                raise RuntimeError("PDF conversion produced no CBZ")
+            cbz_path = get_unique_filepath(os.path.splitext(pdf_path)[0] + ".cbz")
+            os.replace(staged_cbz, cbz_path)
+            match_parent_permissions(cbz_path)
+            clear_problem(pdf_path, SOURCE_CONVERT)
+            return cbz_path
+        except Exception as e:
+            monitor_logger.error(f"PDF conversion failed for {pdf_path}: {e}")
+            if os.path.exists(staged) and not os.path.exists(pdf_path):
+                os.replace(staged, pdf_path)
+            record_problem(pdf_path, SOURCE_CONVERT, exc=e)
+            return None
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
 
 
     def _maybe_unwrap_release_folder(self, folder_path):
@@ -875,6 +900,24 @@ class DownloadCompleteHandler(FileSystemEventHandler):
             # Archives are always opened; how depends on what is inside them.
             if os.path.splitext(filepath)[1].lower() in ARCHIVE_EXTS:
                 return self._process_archive(filepath)
+
+            # A PDF is converted before it is renamed or moved, like a CBR is
+            # converted: it used to reach TARGET as a raw PDF unless it came
+            # out of a multipart release folder (_handoff_unwrapped).
+            if self.autoconvert and filepath.lower().endswith(".pdf"):
+                cbz_path = self._convert_pdf(filepath)
+                if cbz_path is None:
+                    return False
+                key = os.path.abspath(cbz_path)
+                with self._processing_lock:
+                    if key in self._in_flight:
+                        return True
+                    self._in_flight.add(key)
+                try:
+                    return self._process_file(cbz_path)
+                finally:
+                    with self._processing_lock:
+                        self._in_flight.discard(key)
 
             if self.auto_rename_monitor:
                 renamed_filepath = self._rename_file(filepath)
