@@ -2037,3 +2037,80 @@ class TestMetadataRenameNeverOverwrites:
             assert rename_comic_from_metadata(str(f), self.META) == (str(f), False)
         assert taken.read_bytes() == b"already filed"
         assert f.read_bytes() == b"new"
+
+
+# ===== #833: a leading "#NN" weekly-pack index (review of PR #838) =====
+
+class TestLeadingPackIndex:
+    """A weekly pack numbers its files "#06-Glory ... #1". The "#06" is the
+    file's place in the pack, not its issue. Every parser must see the name
+    without it; a real leading issue ("#1 - Spawn - Cover #2 of 3") is kept.
+
+    The shipped rule engine and both custom-rename settings are pinned so the
+    result does not depend on the environment.
+    """
+
+    PACK = [
+        # (finding 1) paren-tagged and untagged: rule70 took "#06" -> "006 (2014).cbz"
+        ("#06-Glory - Angela - Angels In Hell #1 (2014).cbz", "Glory - Angela - Angels In Hell 001 (2014).cbz"),
+        ("#06-Glory - Angela - Angels In Hell #1 (2014) (digital) (OTK).cbz", "Glory - Angela - Angels In Hell 001 (2014).cbz"),
+        ("#06-Glory - Angela - Angels In Hell #1 [OTK].cbz", "Glory - Angela - Angels In Hell 001.cbz"),
+        ("#06-Glory - Angela - Angels In Hell #1 (2014) [OTK].cbz", "Glory - Angela - Angels In Hell 001 (2014).cbz"),
+        # (finding 3) year before the issue (rule40 drops the extension: separate bug)
+        ("#06-Glory (2014) #1 (digital).cbz", "Glory 001 (2014)"),
+        # (finding 4) issue written without "#"
+        ("#06-Glory 001 (2014) [OTK].cbz", "Glory 001 (2014).cbz"),
+        # (finding 6) decimal index
+        ("#06.5 Glory #1.cbz", "Glory 001.cbz"),
+        # (finding 7) other separators
+        ("#06 – Glory #1.cbz", "Glory 001.cbz"),
+        ("#06: Glory #1.cbz", "Glory 001.cbz"),
+        ("#06) Glory #1.cbz", "Glory 001.cbz"),
+        # (finding 8) numeric-leading title must survive clean_filename_pre 3c
+        ("#06-100 Bullets #5.cbz", "100 Bullets 005.cbz"),
+    ]
+
+    @staticmethod
+    def _prefs(custom):
+        return patch(
+            "core.database.get_user_preference",
+            side_effect=lambda key, default=None: {
+                "enable_custom_rename": custom,
+                "custom_rename_pattern": "{series_name} {issue_number} ({year})",
+                "rename_clean_spaces_enabled": False,
+                "rename_char_replacements": {},
+            }.get(key, default),
+        )
+
+    @pytest.mark.parametrize("filename,expected", PACK)
+    def test_default_rename_drops_the_pack_index(self, filename, expected):
+        from cbz_ops.rename import get_renamed_filename
+        with self._prefs(False), patch("cbz_ops.rename.load_issue_pad_width", return_value=3):
+            assert get_renamed_filename(filename) == expected
+
+    @pytest.mark.parametrize("filename,expected", [
+        ("#06-Glory - Angela - Angels In Hell #1 (2014) [OTK].cbz", ("Glory - Angela - Angels In Hell", "001")),
+        ("#06-Glory - Angela - Angels In Hell #1 (2014).cbz", ("Glory - Angela - Angels In Hell", "001")),
+        ("#06-100 Bullets #5 (2000).cbz", ("100 Bullets", "005")),
+    ])
+    def test_extracted_values_drop_the_pack_index(self, filename, expected):
+        """(finding 2) custom rename and provider searches use extract_comic_values."""
+        from cbz_ops.rename import extract_comic_values
+        v = extract_comic_values(filename)
+        assert (v["series_name"], v["issue_number"]) == expected
+
+    def test_custom_rename_drops_the_pack_index(self):
+        from cbz_ops.rename import get_renamed_filename
+        with self._prefs(True), patch("cbz_ops.rename.load_issue_pad_width", return_value=3):
+            assert (get_renamed_filename("#06-Glory - Angela - Angels In Hell #1 (2014) [OTK].cbz")
+                    == "Glory - Angela - Angels In Hell 001 (2014).cbz")
+
+    @pytest.mark.parametrize("filename", [
+        "#1 - Spawn - Cover #2 of 3.cbz",     # (finding 5) "#2 of 3" is a cover count
+        "#12 Spawn.cbz",                       # nothing after: "#12" is the issue
+    ])
+    def test_a_real_leading_issue_is_kept(self, filename):
+        from cbz_ops.rename import get_renamed_filename
+        with self._prefs(False), patch("cbz_ops.rename.load_issue_pad_width", return_value=3):
+            out = get_renamed_filename(filename)
+        assert out is None  # no way to tell where the title is: keep the name

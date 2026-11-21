@@ -61,7 +61,13 @@ TITLE_YEAR_PATTERN = re.compile(
 ISSUE_HASH_PATTERN = re.compile(
     r"^(.*?)\s*#\s*(\d{1,4}(?:\.\w+)?)\b(.*)(\.\w+)$", re.IGNORECASE
 )
-LEADING_HASH_INDEX = re.compile(r"^\s*#\s*\d{1,4}\s*[-_.]?\s*")
+# A weekly pack numbers its files "#06-Glory ... #1": "#06" is the place in the
+# pack. Any separator may follow it, and the index may be decimal ("#06.5").
+LEADING_HASH_INDEX = re.compile(r"^\s*#\s*\d{1,4}(?:\.\d+)?\s*[-\u2013\u2014:).]?\s*")
+# An issue number later in the name: "#5" or a bare "001". Counts ("#2 of 3")
+# and (...)/[...] groups are blanked out before the search.
+_LATER_ISSUE = re.compile(r"#\s*\d|(?<![\w.])\d{1,4}(?![\w.])")
+_NOT_AN_ISSUE = re.compile(r"\(.*?\)|\[.*?\]|#?\s*\d+\s+of\s+\d+", re.IGNORECASE)
 
 # -------------------------------------------------------------------
 # Original ISSUE_PATTERN:
@@ -1093,16 +1099,34 @@ _BARE_YEAR_TAIL = re.compile(
 )
 
 
+def strip_pack_index(filename):
+    """Drop a leading weekly-pack index: ``#06-Glory #1.cbz`` -> ``Glory #1.cbz``.
+
+    Only when the rest of the name still has an issue number, so a real
+    leading issue (``#12 Spawn.cbz``, ``#1 - Spawn - Cover #2 of 3.cbz``) is kept.
+    """
+    m = LEADING_HASH_INDEX.match(filename)
+    if not m:
+        return filename
+    rest = filename[m.end():]
+    if _LATER_ISSUE.search(_NOT_AN_ISSUE.sub(" ", rest.rpartition(".")[0])):
+        return rest
+    return filename
+
+
 def normalize_release_name(filename):
     """Reshape a scene-style filename into the ordinary ``Series NN (YYYY)``.
 
-    Returns *filename* unchanged unless it has underscores for spaces or a
+    A leading pack index is always dropped (``strip_pack_index``). Beyond that,
+    returns *filename* unchanged unless it has underscores for spaces or a
     bare ``NN of MM`` count. The year/tail rewrite runs only when one of those
     fired, so an ordinary name that merely contains a year is never touched.
     """
     stem, dot, ext = filename.rpartition(".")
     if not dot:
         return filename
+    filename = strip_pack_index(filename)
+    stem = filename.rpartition(".")[0]
     changed = False
     if "_" in stem and " " not in stem:
         filename = stem.replace("_", " ") + "." + ext
@@ -2377,11 +2401,11 @@ def get_renamed_filename(filename, file_path=None):
     # ==========================================================
     hash_match = ISSUE_HASH_PATTERN.match(cleaned_filename)
     if hash_match and not hash_match.group(1).strip():
-        # A leading "#NN" is a pack index ("#06-Glory - ... #1"), not the issue:
-        # match after it, and never build a name with no title ("006.cbz").
-        hash_match = ISSUE_HASH_PATTERN.match(LEADING_HASH_INDEX.sub("", cleaned_filename, count=1))
-        if hash_match and not hash_match.group(1).strip():
-            hash_match = None
+        # The name starts with its issue ("#12 Spawn", "#1 - Spawn - Cover #2 of 3"):
+        # no pattern can say where the title is, so keep the name rather than
+        # build one with no title ("012.cbz") or the wrong number.
+        app_logger.info(f"Leading issue number with no title before it, keeping: {filename}")
+        return None
     if hash_match:
         app_logger.info(f"Matched ISSUE_HASH_PATTERN for: {cleaned_filename}")
         raw_title, issue_num, middle, extension = hash_match.groups()
