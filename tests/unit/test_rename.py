@@ -2056,8 +2056,6 @@ class TestLeadingPackIndex:
         ("#06-Glory - Angela - Angels In Hell #1 (2014) (digital) (OTK).cbz", "Glory - Angela - Angels In Hell 001 (2014).cbz"),
         ("#06-Glory - Angela - Angels In Hell #1 [OTK].cbz", "Glory - Angela - Angels In Hell 001.cbz"),
         ("#06-Glory - Angela - Angels In Hell #1 (2014) [OTK].cbz", "Glory - Angela - Angels In Hell 001 (2014).cbz"),
-        # (finding 3) year before the issue (rule40 drops the extension: separate bug)
-        ("#06-Glory (2014) #1 (digital).cbz", "Glory 001 (2014)"),
         # (finding 4) issue written without "#"
         ("#06-Glory 001 (2014) [OTK].cbz", "Glory 001 (2014).cbz"),
         # (finding 6) decimal index
@@ -2087,6 +2085,14 @@ class TestLeadingPackIndex:
         from cbz_ops.rename import get_renamed_filename
         with self._prefs(False), patch("cbz_ops.rename.load_issue_pad_width", return_value=3):
             assert get_renamed_filename(filename) == expected
+
+    def test_year_first_drops_the_pack_index(self):
+        """(finding 3) year before the issue. Only the stem is checked: rule40
+        drops the extension here on main, a separate bug."""
+        from cbz_ops.rename import get_renamed_filename
+        with self._prefs(False), patch("cbz_ops.rename.load_issue_pad_width", return_value=3):
+            out = get_renamed_filename("#06-Glory (2014) #1 (digital).cbz")
+        assert out.removesuffix(".cbz") == "Glory 001 (2014)"
 
     @pytest.mark.parametrize("filename,expected", [
         ("#06-Glory - Angela - Angels In Hell #1 (2014) [OTK].cbz", ("Glory - Angela - Angels In Hell", "001")),
