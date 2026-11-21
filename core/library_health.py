@@ -36,7 +36,9 @@ Things that look arbitrary and are not:
 - **Duplicates are derived, never stored.** "Exact" is two ``file_health`` rows
   with one hash whose files are still indexed; "likely" is the same tagged
   series+issue(+year+publisher), or a same-folder name that differs only by a
-  copy marker. A likely group is never acted on automatically, and nothing here
+  copy marker, then checked against the files (``core.duplicate_evidence``): a
+  group whose content clearly differs is reported as ``mismatched`` instead.
+  A likely group is never acted on automatically, and nothing here
   deletes: ``resolve_group`` is the only mover and it is user-driven.
 - **A dismissed group is keyed on its member set.** A new copy of an issue the
   user already waved through re-opens the group.
@@ -960,14 +962,17 @@ def _member(row, health):
 
 
 def find_duplicates(include_dismissed=False, strict=False):
-    """``{exact: [...], likely: [...], total_groups}`` -- derived on every call.
+    """``{exact: [...], likely: [...], mismatched: [...]}`` -- derived on every call.
 
     Never raises; a read failure yields empty lists -- unless ``strict``, for a
     caller that must tell "this group is gone" from "could not look".
     """
     from core.database import db_conn
 
-    out = {"exact": [], "likely": []}
+    from core import duplicate_evidence
+
+    out = {"exact": [], "likely": [], "mismatched": []}
+    budget = duplicate_evidence.Budget()
     try:
         with db_conn() as conn:
             if not conn:
@@ -1005,6 +1010,19 @@ def find_duplicates(include_dismissed=False, strict=False):
             members = [_member(by_path[p], health) for p in paths]
             members.sort(key=lambda m: m["path"])
             keeper = _suggest_keeper(members)
+            evidence = None
+            if kind == "likely":
+                # A likely group is tags and names only; let the files confirm it.
+                if budget.left():
+                    evidence = duplicate_evidence.group_evidence(members)
+                    reason = f"{reason}; {duplicate_evidence.describe(evidence)}"
+                    if evidence["verdict"] == "different":
+                        kind = "mismatched"  # same tags, different comics: a tagging problem
+                    sup = evidence["superset"]
+                    if sup and next(m for m in members if m["path"] == sup).get("status") != "damaged":
+                        keeper = sup
+                else:
+                    reason = f"{reason}; content not checked yet"
             sizes = [m["size"] or 0 for m in members]
             keep_size = next((m["size"] or 0 for m in members if m["path"] == keeper), 0)
             out[kind].append({
@@ -1020,6 +1038,7 @@ def find_duplicates(include_dismissed=False, strict=False):
                 "members": members,
                 "keep_suggestion": keeper,
                 "wasted_bytes": max(0, sum(sizes) - keep_size),
+                "evidence": evidence,
             })
 
         # Exact: identical bytes.
@@ -1070,13 +1089,13 @@ def find_duplicates(include_dismissed=False, strict=False):
             emit("likely", "Same name in one folder, apart from a copy marker",
                  "name:" + _sha("|".join(key)), paths)
 
-        for kind in ("exact", "likely"):
+        for kind in ("exact", "likely", "mismatched"):
             out[kind].sort(key=lambda g: g["wasted_bytes"], reverse=True)
     except Exception as e:
         app_logger.error(f"Library health: duplicate search failed: {e}")
         if strict:
             raise
-        return {"exact": [], "likely": []}
+        return {"exact": [], "likely": [], "mismatched": []}
     return out
 
 

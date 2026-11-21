@@ -160,6 +160,9 @@ def api_duplicates():
         "total_groups": total,
         "truncated": total > len(exact) + len(likely),
         "wasted_bytes": sum(g["wasted_bytes"] for g in found["exact"]),
+        # Same tags, different content: a tagging problem, not a duplicate.
+        "mismatched": found.get("mismatched", [])[:MAX_DUPLICATE_GROUPS],
+        "mismatched_groups": len(found.get("mismatched", [])),
     })
 
 

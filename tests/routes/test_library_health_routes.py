@@ -174,6 +174,15 @@ class TestDuplicates:
         assert data["total_groups"] == 2 and data["truncated"] is False
         assert data["wasted_bytes"] == 10  # only exact duplicates count as reclaimable
 
+    def test_mismatched_groups_are_listed_but_not_counted(self, client):
+        """Same tags, different content (#837): reported, never a duplicate."""
+        found = {"exact": [], "likely": [], "mismatched": [_group("m1", "mismatched")]}
+        with patch("core.library_health.find_duplicates", return_value=found):
+            data = client.get("/api/problem-files/duplicates").get_json()
+        assert data["total_groups"] == 0
+        assert [g["id"] for g in data["mismatched"]] == ["m1"]
+        assert data["mismatched_groups"] == 1
+
     def test_include_dismissed_is_passed_through(self, client):
         with patch("core.library_health.find_duplicates",
                    return_value={"exact": [], "likely": []}) as find:
