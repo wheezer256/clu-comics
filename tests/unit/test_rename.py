@@ -242,10 +242,21 @@ class TestOneMillionException:
 
     # --- rule engine (config/rename_rules.ini) ---
     @pytest.mark.parametrize("filename,expected", [
+        ("Spider-Man 2099 (1992) #44 (digital) (Colecionadores.GO).cbz", "Spider-Man 2099 044 (1992).cbz"),  # rule40
+        ("Hokum & Hex v1 001 (199309) (digital).cbz", "Hokum & Hex v1 001 (1993).cbz"),                       # rule85
+        ("Action Comics (1998) #1000000 (digital).cbz", "Action Comics 1000000 (1998).cbz"),                # rule201
+    ])
+    def test_rule_engine_keeps_the_extension(self, filename, expected):
+        """Regression: a greedy ``.*`` before an optional ``(?P<ext>...)?`` ate the
+        extension, so the file was renamed with none and readers ignored it."""
+        from cbz_ops.rename import try_rule_engine
+        assert try_rule_engine(filename, "config/rename_rules.ini", width=3) == expected
+
+    @pytest.mark.parametrize("filename,expected", [
         ("Action Comics 1000000 (1998).cbz", "Action Comics 1000000 (1998).cbz"),
         ("Superman 1000000 (1998).cbz", "Superman 1000000 (1998).cbz"),
         ("Action Comics #1000000 (1998).cbz", "Action Comics 1000000 (1998).cbz"),
-        ("Action Comics (1998) #1000000.cbz", "Action Comics 1000000 (1998)"),
+        ("Action Comics (1998) #1000000.cbz", "Action Comics 1000000 (1998).cbz"),
         ("Superman 1000000 (1998) (digital) (Son of Ultron).cbz",
          "Superman 1000000 (1998).cbz"),
     ])
