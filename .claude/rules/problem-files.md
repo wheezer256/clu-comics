@@ -368,6 +368,22 @@ Things that look arbitrary and are not:
   "Aquaman / Jabberjaw Special" one-shots) carries one series/number/year across
   different comics; a tag that contradicts the filename is a tagging problem, not
   a duplicate. A blank year is not a wildcard.
+- **A likely group is checked against the files** (`core/duplicate_evidence.py`,
+  #837). Wrong tags still make wrong groups (Magic 7 #4 and #5 both tagged #4).
+  Two signals: shared pages, as (CRC-32, size) from the zip central directory,
+  so no page is decompressed; and the first page's `core.cover_hash` pHash for
+  rescans that share no bytes. Half the smaller file's pages shared, or a cover
+  within `SAME_COVER_BITS`, is `same`. A cover at least `DIFFERENT_COVER_BITS`
+  apart with **no** shared page is `different`: the group moves to
+  `mismatched`, which is reported but never counted or resolvable, because it
+  is a tagging problem. Anything else, CBR included, is `unknown` and stays a
+  likely group exactly as before. A member holding every page of the others
+  and more is the keep suggestion unless damaged.
+  - The evidence is **derived like the groups, never stored**. File reads are
+    memoised on (path, size, mtime) and one call may spend
+    `EVIDENCE_BUDGET_SECONDS` on them. Groups past the budget say "content not
+    checked yet" and are read on a later call: on a NAS, an unbounded first call
+    would outlast gunicorn's 120s timeout.
 - **A dismissed group is keyed on its member set**, so a new copy re-opens it.
   There are two kinds (`duplicate_dismissals.until_scan`). *Not duplicates* is
   for good. *Dismiss* means "I sorted it out elsewhere", for example in the

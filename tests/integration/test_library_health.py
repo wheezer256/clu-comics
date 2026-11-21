@@ -535,6 +535,98 @@ class TestDuplicates:
         group = lh.find_duplicates()["likely"][0]
         assert group["keep_suggestion"] == a
 
+    # --- Content evidence for likely groups (#837) -------------------------
+
+    @staticmethod
+    def _page(seed, size=(400, 600)):
+        """A JPEG of seeded noise: decodable, and unlike any other seed."""
+        import io
+        import random
+        from PIL import Image
+
+        rnd = random.Random(seed)
+        small = Image.new("L", (16, 24))
+        small.putdata([rnd.randrange(256) for _ in range(16 * 24)])
+        buf = io.BytesIO()
+        small.resize(size).convert("RGB").save(buf, "JPEG", quality=90)
+        return buf.getvalue()
+
+    def _comic(self, path, seeds, size=(400, 600)):
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as zf:
+            for i, seed in enumerate(seeds, 1):
+                zf.writestr(f"p{i:03d}.jpg", self._page(seed, size))
+        return str(path)
+
+    TAG = {"ci_series": "Magic 7", "ci_number": "4", "ci_year": 2018, "ci_publisher": "Aspen"}
+
+    def test_shared_pages_confirm_a_likely_group_and_pick_the_superset(self, store, library):
+        a = self._comic(library / "Magic 7 004 (2018).cbz", [1, 2, 3, 4])
+        b = self._comic(library / "Magic 7 004 (2018) (digital).cbz", [1, 2, 3, 4, 5])
+        _index(store, a, has_comicinfo=1, **self.TAG)
+        _index(store, b, **self.TAG)
+        group = lh.find_duplicates()["likely"][0]
+        assert group["evidence"]["verdict"] == "same"
+        assert "content matches" in group["reason"]
+        # Untagged, but holds every page of the other and one more.
+        assert group["keep_suggestion"] == b
+
+    def test_same_tags_different_comics_are_mismatched_not_likely(self, store, library):
+        """Magic 7 #4 and #5, both tagged #4: the covers say otherwise."""
+        a = self._comic(library / "Magic 7 004 (2018).cbz", [1, 2, 3])
+        b = self._comic(library / "Magic 7 004 (2018) (digital).cbz", [7, 8, 9])
+        _index(store, a, **self.TAG)
+        _index(store, b, **self.TAG)
+        found = lh.find_duplicates()
+        assert found["likely"] == []
+        assert len(found["mismatched"]) == 1
+        assert found["mismatched"][0]["evidence"]["verdict"] == "different"
+        assert lh.count_duplicates() == (0, 0)
+
+    def test_same_cover_rescanned_is_confirmed_by_the_cover(self, store, library):
+        """Two scans of one issue share no bytes, but the cover is one image."""
+        from core import duplicate_evidence
+
+        a = self._comic(library / "Magic 7 004 (2018).cbz", [1, 2, 3, 4])
+        b = self._comic(library / "Magic 7 004 (2018) (digital).cbz", [1, 5, 6, 7], size=(800, 1200))
+        _index(store, a, **self.TAG)
+        _index(store, b, **self.TAG)
+        group = lh.find_duplicates()["likely"][0]
+        pair = group["evidence"]["pairs"][0]
+        assert group["evidence"]["verdict"] == "same"
+        assert pair["page_share"] == 0 and pair["cover_bits"] <= duplicate_evidence.SAME_COVER_BITS
+
+    def test_a_cover_pack_sharing_its_cover_is_not_a_copy(self, store, library):
+        """Umbrella Academy: a 2-page cover pack holds the issue's cover. Half its
+        pages are shared, but one page is not a copy of the issue."""
+        a = self._comic(library / "Magic 7 004 (2018).cbz", [1, 2, 3, 4, 5, 6])
+        b = self._comic(library / "Magic 7 004 (2018) (digital).cbz", [1, 9])
+        _index(store, a, **self.TAG)
+        _index(store, b, **self.TAG)
+        found = lh.find_duplicates()
+        group = (found["likely"] + found["mismatched"])[0]
+        assert group["evidence"]["verdict"] != "same"
+
+    def test_a_collection_with_the_issues_cover_is_not_a_copy(self, store, library):
+        """A trade opens with its first issue's cover: same cover, not a duplicate."""
+        a = self._comic(library / "Magic 7 004 (2018).cbz", [1, 2, 3, 4])
+        b = self._comic(library / "Magic 7 004 (2018) (digital).cbz", [1] + list(range(20, 30)),
+                        size=(800, 1200))
+        _index(store, a, **self.TAG)
+        _index(store, b, **self.TAG)
+        group = lh.find_duplicates()["likely"][0]
+        assert group["evidence"]["verdict"] == "unknown"
+
+    def test_out_of_budget_groups_stay_likely_unchecked(self, store, library):
+        from core import duplicate_evidence
+
+        a = self._comic(library / "Magic 7 004 (2018).cbz", [1, 2, 3])
+        b = self._comic(library / "Magic 7 004 (2018) (digital).cbz", [7, 8, 9])
+        _index(store, a, **self.TAG)
+        _index(store, b, **self.TAG)
+        with patch.object(duplicate_evidence.Budget, "left", return_value=False):
+            group = lh.find_duplicates()["likely"][0]
+        assert group["evidence"] is None and "not checked yet" in group["reason"]
+
     def test_dismissal_holds_until_the_member_set_changes(self, store, library):
         a, b = self._two_identical(store, library)
         gid = lh.find_duplicates()["exact"][0]["id"]
